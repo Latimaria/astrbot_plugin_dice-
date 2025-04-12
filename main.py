@@ -1,6 +1,7 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+from astrbot.api import AstrBotConfig
 
 import random
 import re
@@ -27,12 +28,51 @@ PC_COMMANDS = ["new", "tag", "show", "nn", "cpy", "del", "list", "clear"]
 #         if not self.valid:
 #             print("invalid character")
 #             return None
-        
+def create_parents(filepath):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
+def extract_outer_braces(text):
+    results = []
+    brace_level = 0
+    start = None
+    for i, char in enumerate(text):
+        if char == '{':
+            if brace_level == 0:
+                start = i + 1  # skip the opening brace
+            brace_level += 1
+        elif char == '}':
+            brace_level -= 1
+            if brace_level == 0 and start is not None:
+                results.append(text[start:i])
+                start = None
+    return results
 @register("Dice!", "Lacki", "一个简单的 Hello World 插件", "0.0.0")
 class MyPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
+        logger.info("decks:" + str(self.config.decks))
+        self.decks = {}
+        self.load_decks()
+
+    def load_decks(self):
+        logger.info("loading decks")
+        if not self.config.decks:
+            logger.info("NO decks")
+            return
+        for deck_str in self.config.decks:
+            logger.info("deck: "+ deck_str)
+            deck = extract_outer_braces(deck_str)
+            if len(deck) < 1:
+                logger.info("invalid deck:\n "+ deck_str)
+                continue
+            deck_name = deck[0]
+            deck = deck[1:] if len(deck)>1 else []
+            if deck_name in self.decks and self.decks[deck_name] and self.decks[deck_name]!=[]:
+                self.decks[deck_name] += deck
+            else:
+                self.decks[deck_name] = deck
+            
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("helloworld")
@@ -92,6 +132,28 @@ class MyPlugin(Star):
         
         yield event.plain_result(reply) 
 
+    @filter.command("jrrp")
+    async def jrrp(self, event: AstrMessageEvent):
+        """jin ri ren pin"""
+        user_name = event.get_sender_name()
+        message_str = event.message_str # 用户发的纯文本消息字符串
+        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
+        logger.info(message_chain)
+
+        expression = "1d100"
+        result, explanation = self.roll_dice(expression)
+
+        if not result:
+            reply = f"message_str: {message_str}\n expression: {expression}\n failed to parse"
+            return 
+        
+        reply = f"{user_name} 今天遇到了{result}根小黄瓜！"
+        if result <=5: 
+            reply = f"{user_name} 今天遇到了{result}根死掉的小黄瓜！^^"
+        elif result > 95: 
+            reply += f"{user_name} 今天遇到了{result}根开心的小黄瓜"
+        
+        yield event.plain_result(reply) 
 
     @filter.command("rh")
     async def rh(self, event: AstrMessageEvent):
@@ -158,6 +220,42 @@ class MyPlugin(Star):
         
         yield event.plain_result(reply)
     
+    def draw_from_deck(self, deck_name):
+        deck = self.decks[deck_name]
+        size = len(deck)
+        if size==0:
+            reply = "deck empty!"
+            return reply
+        result, explanation = self.roll_dice(size)
+        if not result:
+            reply = f"failed to roll: {size}"
+            return reply
+        drew = deck[result-1]
+        return drew
+        
+
+    @filter.command("draw")
+    async def draw(self, event: AstrMessageEvent):
+        user_name = event.get_sender_name()
+        message_str = event.message_str # 用户发的纯文本消息字符串
+       
+        message = self.parse_message(message_str, command="draw")
+        if not message or message=="":
+            reply = "please specify deck!"
+            yield event.plain_result(reply)
+            return
+        
+        # yield event.plain_result(message)
+        tokens = message.strip().split(' ', 2)
+        deck_name = tokens[0]
+        if not deck_name in self.decks:
+            reply = f"deck {deck_name} not exist!"
+            yield event.plain_result(reply)
+            return 
+        
+        reply = self.draw_from_deck(deck_name)
+        yield event.plain_result(reply)
+
 
     @filter.command("pc")
     async def pc(self, event: AstrMessageEvent):
@@ -182,7 +280,7 @@ class MyPlugin(Star):
         tokens = message.strip().split(' ', 2)
 
         num = len(tokens)
-        yield event.plain_result(f"tokens {num}")
+        # yield event.plain_result(f"tokens {num}")
 
         command = None
         if tokens[0] in PC_COMMANDS:
@@ -198,12 +296,14 @@ class MyPlugin(Star):
         logger.info(char_name)
         logger.info(attrs)
 
-        yield event.plain_result(f"command {command} char_name {char_name}")
-
+        # yield event.plain_result(f"command {command} char_name {char_name}")
+        ## "new", "tag", "show", "nn", "cpy", "del", "list", "clear"]
         if command == "new":
             reply = self.pc_new(user_id, char_name, attrs)
         elif command == "show":
             reply = self.pc_show(user_id, char_name)
+        elif command == "tag":
+            reply = self.pc_tag(user_id, char_name)
         else:
             reply = "Unknown command\n"
    
@@ -233,6 +333,29 @@ class MyPlugin(Star):
     def find_user_character_path(self, user_id, char_name):
         user_folder = self.get_user_folder(user_id)
         return os.path.join(user_folder, char_name + ".json")
+
+    def find_user_character(self, user_id, char_name):
+        character_path = self.find_user_character_path(user_id, char_name)
+        if not character_path:
+            reply = f"Dice!: character {char_name} not exist!\n"
+            return None
+        with open(character_path, "r", encoding="utf-8") as f:
+            character = json.load(f)
+        return character
+
+    def find_selected_name_path(self, user_id):
+        user_folder = self.get_user_folder(user_id)
+        return os.path.join(user_folder, "selected")
+    
+    def find_user_selected_character(self, user_id, char_name):
+        user_folder = self.get_user_folder(user_id)
+        selected_name_path = os.path.join(user_folder, "selected")
+        if not os.path.exists(selected_name_path):
+            return None
+        with open(selected_name_path, "r", encoding="utf-8") as f:
+            char_name = f.read().strip()
+        character = self.find_user_character(user_id, char_name)
+        return character
 
     def create_user_character(self, user_id, char_name):
 
@@ -282,7 +405,7 @@ class MyPlugin(Star):
             char_filepath = character["path"]
         logger.debug("char_filepath")
         logger.debug(char_filepath)
-        os.makedirs(os.path.dirname(char_filepath), exist_ok=True)
+        create_parents(char_filepath)
         logger.debug(str(os.path.dirname(char_filepath)))
         with open(char_filepath, "w", encoding="utf-8") as f:
             json.dump(character, f, ensure_ascii=False)
@@ -325,12 +448,10 @@ class MyPlugin(Star):
 
     def pc_show(self, user_id, char_name) :
         reply = "show character\n"
-        character_path = self.find_user_character_path(user_id, char_name)
-        if not character_path:
+        character = self.find_user_character(user_id, char_name)
+        if not character:
             reply = f"Dice!: character {char_name} not exist!\n"
             return reply
-        with open(character_path, "r", encoding="utf-8") as f:
-            character = json.load(f)
         name = character["name"]
         reply += f"NAME: {name}\n"
         max_hp = character["max_hp"]
@@ -343,3 +464,15 @@ class MyPlugin(Star):
             reply += f"    {key}: {value}\n"
         return reply
     
+    def pc_tag(self, user_id, char_name):
+        character = self.find_user_character(user_id, char_name)
+        if not character:
+            reply = f"Dice!: character {char_name} not exist!\n"
+            return reply
+        selected_name_path = self.find_selected_name_path(user_id)
+        create_parents(selected_name_path)
+        with open(selected_name_path, "w", encoding="utf-8") as f:
+            f.write(char_name)
+        reply = f"selected character: {char_name}"
+        return reply
+
