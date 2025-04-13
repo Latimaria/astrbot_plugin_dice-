@@ -2,17 +2,26 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
+# from astrbot.core.star.filter.event_message_type import EventMessageType
+from astrbot.api.event.filter import *
+
 
 import random
 import re
 import json
 import os
 import uuid
+import datetime
 
 import rolldice
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__)) 
-DATA_DIR = os.path.join(ROOT_DIR, "data") 
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__)) 
+DATA_DIR = os.path.dirname(os.path.dirname(PLUGIN_DIR))
+DICE_DATA_DIR = os.path.join(DATA_DIR, "astrbot_plugin_dice-")
+
+USER_DIR = os.path.join(DICE_DATA_DIR, "users")
+GROUP_DIR = os.path.join(DICE_DATA_DIR, "groups")
+# LOG_DIR = os.path.join(DICE_DATA_DIR, "game_logs")
 PC_COMMANDS = ["new", "tag", "show", "nn", "cpy", "del", "list", "clear"]
 # -- data
 #      \___ user1 __ PC1 
@@ -46,6 +55,45 @@ def extract_outer_braces(text):
                 results.append(text[start:i])
                 start = None
     return results
+
+def read_last_n_lines(file_path, n, buffer_size=1024, count_empty=True):
+    with open(file_path, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        end = f.tell()
+        lines = []
+        block = b''
+        while end > 0 and len(lines) <= n:
+            # Move the pointer back by buffer_size (or less if near the start)
+            read_size = min(buffer_size, end)
+            end -= read_size
+            f.seek(end)
+            block = f.read(read_size) + block
+            lines = block.split(b'\n')
+        
+        if count_empty:
+            lines = [line.decode('utf-8') for line in lines[-n:]]
+        else:
+            lines = [line.decode('utf-8') for line in lines[-n:] if line]
+        return lines
+
+def read_json(filepath):
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
+def write_json(filepath, data):
+    create_parents(filepath)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+def read_txt(filepath):
+    with open(filepath, "r", encoding="utf-8") as f:
+        return f.read().strip()
+def write_txt(filepath, data):
+    create_parents(filepath)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(data)
+def append_txt(filepath, data):
+    create_parents(filepath)
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(data)
 @register("Dice!", "Lacki", "一个简单的 Hello World 插件", "0.0.0")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -256,6 +304,69 @@ class MyPlugin(Star):
         reply = self.draw_from_deck(deck_name)
         yield event.plain_result(reply)
 
+    def log_new(self, group_id, log_name=None):
+        current_time = datetime.datetime.now()
+        log_id = str(uuid.uuid4())
+        group_log_path = self.get_group_log_path(group_id, log_id)
+        write_txt(group_log_path, current_time.strftime("%c"))
+        self.add_group_log_index(group_id, log_id, log_name)
+        self.set_group_current_log(group_id, log_id)
+        reply = "log created: " + log_id 
+        return reply
+    def log_end(self, group_id, log_id):
+        current_time = datetime.datetime.now()
+        group_log_path = self.get_group_log_path(group_id, log_id)
+        if not os.path.exists(group_log_path):
+            reply = "log not found"
+            return reply
+        append_txt(group_log_path, "\n\n" + current_time.strftime("%c"))
+        # self.add_group_log_index(group_id, log_id, log_name)
+        self.set_group_current_log(group_id, None)
+        # reply = "log created: " + log_id 
+        # TODO send log to user
+        return reply
+    def log_preview(self, group_id, log_id, log_name=None, num_lines=10):
+        group_log_path = self.get_group_log_path(group_id, log_id)
+        if not os.path.exists(group_log_path):
+            reply = f"LOG {log_id} NOT FOUND"
+            return reply
+        preview = read_last_n_lines(group_log_path, num_lines)
+        log_name = log_name if log_name else log_id
+        reply = f"LAST {num_lines} LINES of {log_name}:\n-\n" + '\n'.join(preview)
+        return reply
+
+    @filter.command("log")
+    async def log(self, event: AstrMessageEvent):
+        message_str = event.message_str
+        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
+        logger.debug(message_chain)
+        message = self.parse_message(message_str, command="log")
+        group_id = event.get_group_id()
+
+        tokens = message.strip().split(' ', 2) + ["", "", ""]
+        if tokens[0] == "new":
+            logger.debug("log new")
+            reply = self.log_new(group_id)
+        elif tokens[0] == "on":
+            logger.debug("log on")
+            reply = "log on"
+        elif tokens[0] == "off":
+            logger.debug("log off")
+            reply = "log off"
+        elif tokens[0] == "end":
+            logger.debug("log end")
+            reply = self.log_end(group_id)
+            reply = "log end"
+        elif tokens[0] == "view":
+            logger.debug("log view")
+            log_id = self.find_group_current_log_id(group_id)
+            # yield event.plain_result(f"CURRENT LOG: {log_id}")
+            logger.debug(f"CURRENT LOG: {log_id}")
+            reply = self.log_preview(group_id, log_id)
+            
+        else:
+            reply = "invalid command"
+        yield event.plain_result(reply)
 
     @filter.command("pc")
     async def pc(self, event: AstrMessageEvent):
@@ -309,13 +420,44 @@ class MyPlugin(Star):
    
         yield event.plain_result(reply)
 
+    # @filter.on_decorating_result()
+    # async def on_decorating_result(self, event: AstrMessageEvent):
+    #     result = event.get_result()
+    #     message_str = result.get_plain_text()
+    #     if self.IsError_filter:
+    #         if '请求失败' in message_str:
+    #             logger.info(message_str)
+    #             event.stop_event() # 停止回复
+    @event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def on_group_message(self, event: AstrMessageEvent):
+        current_time = datetime.datetime.now()
 
+        group_id = event.get_group_id()
+        current_log_path = self.find_group_current_logging_path(group_id)
+        if not current_log_path:
+            return
+        user_name = event.get_sender_name()
+        sender_id = event.get_sender_id()
+        message_str = event.message_str # 用户发的纯文本消息字符串
+        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
+        
+        log = current_time.strftime("%c") + f" {user_name} ({sender_id}):\n"
+        log = log + message_str + "\n"
+        append_txt(current_log_path, log)
 
 
     ##########################################
     def get_user_folder(self, user_id):
-        user_folder = os.path.join(DATA_DIR, str(user_id))
+        user_folder = os.path.join(USER_DIR, str(user_id))
         return user_folder
+    def get_group_folder(self, group_id):
+        group_folder = os.path.join(GROUP_DIR, str(group_id))
+        return group_folder
+    def get_group_log_path(self, group_id, log_id):
+        group_folder = self.get_group_folder(group_id)
+        log_root = os.path.join(group_folder, "LOGS")
+        log_folder = os.path.join(log_root, str(log_id))
+        return log_folder
 
     def get_user_characters(self, user_id):
         user_folder = self.get_user_folder(user_id)
@@ -339,23 +481,76 @@ class MyPlugin(Star):
         if not character_path:
             reply = f"Dice!: character {char_name} not exist!\n"
             return None
-        with open(character_path, "r", encoding="utf-8") as f:
-            character = json.load(f)
-        return character
-
+        return read_json(character_path)
     def find_selected_name_path(self, user_id):
         user_folder = self.get_user_folder(user_id)
         return os.path.join(user_folder, "selected")
+    def find_group_current_log_name_path(self, group_id):
+        group_folder = self.get_group_folder(group_id)
+        return os.path.join(group_folder, "current_log")
+    def find_group_current_logging_path(self, group_id):
+        current_log_id = self.find_group_current_log_id(group_id)
+        current_log_path = self.get_group_log_path(group_id, current_log_id)
+        if not os.path.exists(current_log_path):
+            return None
+        return current_log_path
     
-    def find_user_selected_character(self, user_id, char_name):
-        user_folder = self.get_user_folder(user_id)
-        selected_name_path = os.path.join(user_folder, "selected")
+    def get_group_logs_index_path(self, group_id):
+        group_folder = self.get_group_folder(group_id)
+        return os.path.join(group_folder, "logs_index.json")
+    def find_group_logs(self, group_id):
+        group_logs_index_path = self.get_group_logs_index_path(group_id)
+        if not os.path.exists(group_logs_index_path):
+            return {}
+        return read_json(group_logs_index_path)
+    def add_group_log_index(self, group_id, log_id, log_name=None):
+        group_logs_index_path = self.get_group_logs_index_path(group_id)
+        group_logs = self.find_group_logs(group_id)
+        if log_id in group_logs:
+            reply = f"log {log_id} already exist for group {group_id}"
+            return reply
+        group_logs[log_id] = log_name
+        log_name = log_name if log_name else log_id
+        write_json(group_logs_index_path, group_logs)
+        return f"log {log_name} added for group {group_id}"
+    def remove_group_log_from_index(self, group_id, log_id):
+        group_logs_index_path = self.get_group_logs_index(group_id)
+        group_logs = self.find_group_logs(group_id)
+        if log_id not in group_logs:
+            reply = f"log {log_id} not exist for group {group_id}"
+            return reply
+        log_name = group_logs.pop('key', None)
+        log_name = log_name if log_name else log_id
+        write_json(group_logs_index_path, group_logs)
+        return f"log {log_name} removed for group {group_id}"
+        
+    def find_group_current_log_id(self, group_id):
+        current_log_path = self.find_group_current_log_name_path(group_id)
+        if not os.path.exists(current_log_path):
+            return None
+        log_id = read_txt(current_log_path)
+        if log_id == "" or log_id == "None":
+            return None
+        return log_id
+    def set_group_current_log(self, group_id, log_id):
+        current_log_path = self.find_group_current_log_name_path(group_id)
+        write_txt(current_log_path, log_id)
+    
+    def find_user_selected_character(self, user_id):
+        selected_name_path = self.find_selected_name_path(user_id)
         if not os.path.exists(selected_name_path):
             return None
-        with open(selected_name_path, "r", encoding="utf-8") as f:
-            char_name = f.read().strip()
+        char_name = read_txt(selected_name_path)
+        if not char_name or char_name=="":
+            return None
         character = self.find_user_character(user_id, char_name)
         return character
+    def set_user_selected_character(self, user_id, char_name):
+        selected_name_path = self.find_selected_name_path(user_id)
+        if not char_name:
+            char_name = ""
+        write_txt(selected_name_path, char_name)
+        return char_name
 
     def create_user_character(self, user_id, char_name):
 
@@ -405,10 +600,8 @@ class MyPlugin(Star):
             char_filepath = character["path"]
         logger.debug("char_filepath")
         logger.debug(char_filepath)
-        create_parents(char_filepath)
         logger.debug(str(os.path.dirname(char_filepath)))
-        with open(char_filepath, "w", encoding="utf-8") as f:
-            json.dump(character, f, ensure_ascii=False)
+        write_json(char_filepath, character)
 
     ####################################
     def pc_new(self, user_id, char_name, attrs=None):
@@ -470,9 +663,7 @@ class MyPlugin(Star):
             reply = f"Dice!: character {char_name} not exist!\n"
             return reply
         selected_name_path = self.find_selected_name_path(user_id)
-        create_parents(selected_name_path)
-        with open(selected_name_path, "w", encoding="utf-8") as f:
-            f.write(char_name)
+        write_txt(selected_name_path, char_name)
         reply = f"selected character: {char_name}"
         return reply
 
