@@ -355,7 +355,8 @@ class MyPlugin(Star):
             reply = "log off"
         elif tokens[0] == "end":
             logger.debug("log end")
-            reply = self.log_end(group_id)
+            log_id = self.find_group_current_log_id(group_id)
+            reply = self.log_end(group_id, log_id)
             reply = "log end"
         elif tokens[0] == "view":
             logger.debug("log view")
@@ -533,6 +534,8 @@ class MyPlugin(Star):
             return None
         return log_id
     def set_group_current_log(self, group_id, log_id):
+        if not log_id:
+            log_id = ""
         current_log_path = self.find_group_current_log_name_path(group_id)
         write_txt(current_log_path, log_id)
     
