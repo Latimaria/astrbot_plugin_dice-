@@ -4,7 +4,10 @@ from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 # from astrbot.core.star.filter.event_message_type import EventMessageType
 from astrbot.api.event.filter import *
-
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import \
+                AiocqhttpMessageEvent
+from astrbot.api.message_components import Poke,Plain
+import astrbot.api.message_components as Comp
 
 import random
 import re
@@ -23,6 +26,8 @@ USER_DIR = os.path.join(DICE_DATA_DIR, "users")
 GROUP_DIR = os.path.join(DICE_DATA_DIR, "groups")
 # LOG_DIR = os.path.join(DICE_DATA_DIR, "game_logs")
 PC_COMMANDS = ["new", "tag", "show", "nn", "cpy", "del", "list", "clear"]
+failll_keys = ["大失败", "(wink)", "99"]
+EXPRESSION_MAX_TOKENS = 42
 # -- data
 #      \___ user1 __ PC1 
 #              \____ PC2
@@ -56,6 +61,15 @@ def extract_outer_braces(text):
                 start = None
     return results
 
+def read_lines(file_path, max_lines=None):
+    f = open(file_path, "r")
+    if max_lines:
+        lines = f.readlines(max_lines)
+    else:
+        lines = f.readlines()
+    f.close()
+    lines = [line.rstrip("\n") for line in lines]
+    return lines
 def read_last_n_lines(file_path, n, buffer_size=1024, count_empty=True):
     with open(file_path, 'rb') as f:
         f.seek(0, os.SEEK_END)
@@ -101,6 +115,7 @@ class MyPlugin(Star):
         self.config = config
         logger.info("decks:" + str(self.config.decks))
         self.decks = {}
+        self.cp_texts = []
         self.load_decks()
 
     def load_decks(self):
@@ -116,10 +131,15 @@ class MyPlugin(Star):
                 continue
             deck_name = deck[0]
             deck = deck[1:] if len(deck)>1 else []
+            deck = [card.replace(r"\n", "\n") for card in deck]
             if deck_name in self.decks and self.decks[deck_name] and self.decks[deck_name]!=[]:
                 self.decks[deck_name] += deck
             else:
                 self.decks[deck_name] = deck
+        for cp_str in self.config.cp:
+            logger.info("cp text: "+ cp_str)
+            cp_str = cp_str.replace(r"\n", "\n")
+            self.cp_texts.append(cp_str)
             
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
@@ -138,12 +158,13 @@ class MyPlugin(Star):
 
     def parse_message(self, message_str, command="rd"):
         message = message_str.removeprefix(command)
+        
         message = message.replace("x", "*").replace("X", "*")
         message = message.strip().lower()
         return message
 
 
-    def roll_dice(self, expression):
+    def roll_dice(self, expression, result_only=False):
         """roll dice"""
         result = None
         explanation = None
@@ -160,7 +181,25 @@ class MyPlugin(Star):
         except:
             logger.error(f"Dice! Error: failed to parse: {expression}")
 
-        return result, explanation 
+        if result_only:
+            return result
+        return result, explanation, expression
+
+    def roll_dice_with_message(self, message, command=None):
+        result = None
+        explanation = None
+        if command:
+            message = message.removeprefix(command)
+        message = message.strip().lower()
+        message = message.replace("x", "*")
+        message_tokens = message.split(' ')
+        num_tokens = min(len(message_tokens), EXPRESSION_MAX_TOKENS)
+        for i in range(num_tokens, -1, -1):
+            expression = ' '.join(message_tokens[:i])
+            result, explanation, expression = self.roll_dice(expression)
+            if result:
+                break
+        return result, explanation, expression
 
     @filter.command("rd")
     async def rd(self, event: AstrMessageEvent):
@@ -170,14 +209,97 @@ class MyPlugin(Star):
         message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
         logger.info(message_chain)
 
-        expression = self.parse_message(message_str)
-        result, explanation = self.roll_dice(expression)
+        # expression = self.parse_message(message_str)
+        result, explanation, expression = self.roll_dice_with_message(message_str, "rd")
 
         if result:
             reply = f"message_str: {message_str}\n result: {result}\nExplanation: {explanation}"
+            reply = f"<{user_name}>的检定结果\n"
+            reply += "由于 " + message_str + ": \n"
+            reply += f"{expression}=[{explanation}]={result} \n"
+            reply += f"种出了{result}根小黄瓜"
+            if result > 95:
+                reply += ":)"
+            elif result <= 5:
+                 reply += ":("
         else:
             reply = f"message_str: {message_str}\n expression: {expression}\n failed to parse"
         
+        yield event.plain_result(reply) 
+
+    def roll_two(self, num):
+        idx_1 = self.roll_dice(num, True)-1
+        idx_2 = self.roll_dice(num-1, True)-1
+        if idx_2 >= idx_1:
+            idx_2 += 1
+        return idx_1, idx_2
+    @filter.command("群友cp")
+    async def roll_cp(self, event: AstrMessageEvent):
+        """qun you cp"""
+        reply = ""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+        if not group_id:
+            reply = "not in a group"
+            yield event.plain_result(reply) 
+            return
+        candidates = self.get_group_cp_candidates(group_id)
+        if not (str(user_id)) in candidates:
+            self.add_group_cp_candidate(group_id, user_id)
+        num_candidates = len(candidates)
+        # reply = f"num candidates: {num_candidates}\n"
+        if num_candidates < 3:
+            reply = "少于三人用过此指令！"
+            yield event.plain_result(reply) 
+            return
+        
+        # text = r"群友1:(群友1)\n群友2:(群友2)\n"
+        text = self.draw_from_cp_texts()
+        # text = r"This is (hello), but this is escaped \(hello), and again (hello)"
+        # replacement = "WORLD"
+        # idx_1, idx_2 = self.roll_two(num_candidates)
+        idx_1, idx_2, idx_3 = random.sample(range(0,num_candidates), 3)
+        user_id1 = candidates[idx_1]
+        user_id2 = candidates[idx_2]
+        user_id3 = candidates[idx_3]
+
+        text = text.replace(r"\n", "\n")
+
+        nickname1 = user_id1
+        if event.get_platform_name() == "aiocqhttp":
+            assert isinstance(event, AiocqhttpMessageEvent)
+            stranger_info = await event.bot.api.call_action(
+                'get_stranger_info', user_id=user_id1
+            )
+            nickname1 = stranger_info.get("nick", nickname1)
+
+        nickname2 = user_id2
+        if event.get_platform_name() == "aiocqhttp":
+            assert isinstance(event, AiocqhttpMessageEvent)
+            stranger_info = await event.bot.api.call_action(
+                'get_stranger_info', user_id=user_id2
+            )
+            nickname2 = stranger_info.get("nick", nickname2)
+        
+        nickname3 = user_id3
+        if event.get_platform_name() == "aiocqhttp":
+            assert isinstance(event, AiocqhttpMessageEvent)
+            stranger_info = await event.bot.api.call_action(
+                'get_stranger_info', user_id=user_id3
+            )
+            nickname3 = stranger_info.get("nick", nickname3)
+
+        # reply += f"idx: {idx_1}, {idx_2}\n"
+        # reply += f"id: {user_id1}, {user_id2}\n"
+        # reply += f"nick: {nickname1}, {nickname2}\n"
+
+        text = re.sub(r'(?<!\\)\(群友1\)', nickname1, text)
+        text = re.sub(r'(?<!\\)\(群友2\)', nickname2, text)
+        text = re.sub(r'(?<!\\)\(群友3\)', nickname3, text)
+        text = re.sub(r'(?<!\\)\（群友1\）', nickname1, text)
+        text = re.sub(r'(?<!\\)\（群友2\）', nickname2, text)
+        text = re.sub(r'(?<!\\)\（群友3\）', nickname2, text)
+        reply += text
         yield event.plain_result(reply) 
 
     @filter.command("jrrp")
@@ -189,7 +311,7 @@ class MyPlugin(Star):
         logger.info(message_chain)
 
         expression = "1d100"
-        result, explanation = self.roll_dice(expression)
+        result = self.roll_dice(expression, True)
 
         if not result:
             reply = f"message_str: {message_str}\n expression: {expression}\n failed to parse"
@@ -213,14 +335,18 @@ class MyPlugin(Star):
         
         group_id = event.get_group_id()
         logger.info(message_chain)
+        if group_id:
+            reply = f"rh from group {group_id}:\n"
+        else:
+            reply = "rh :\n"
 
-        expression = self.parse_message(message_str)
-        result, explanation = self.roll_dice(expression)
+        # expression = self.parse_message(message_str)
+        result, explanation, expression = self.roll_dice_with_message(message_str, "rh")
 
         if result:
-            reply = f"rh from group {group_id}:\n message_str: {message_str}\n result: {result}\nExplanation: {explanation}"
+            reply += f"message_str: {message_str}\n result: {result}\nExplanation: {explanation}"
         else:
-            reply = f"rh from group {group_id}:\nmessage_str: {message_str}\n expression: {expression}\n failed to parse"
+            reply += f"message_str: {message_str}\n expression: {expression}\n failed to parse"
         
         client = event.bot 
         payloads = {
@@ -248,7 +374,7 @@ class MyPlugin(Star):
 
         message = self.parse_message(message_str, command="ra")
 
-        messages = message.split(' ')
+        messages = message.split(' ', 2) + ["", ""]
         
         target_str = messages[0]
         success = False
@@ -258,11 +384,40 @@ class MyPlugin(Star):
             # TODO read stuff from character card
             target = 50
         
-        result, explanation = self.roll_dice(100)
-            
+        dice = 100
+        result = self.roll_dice(dice, True)
+        reply = f"<{user_name}>的检定结果\n"
+        failll = False
+        for failll_key in failll_keys:
+            if failll_key in messages:
+                failll = True
+                # message.replace(failll_key, "")
+        if failll:
+            result = 99
+            explanation = ":)"
+
+        reply += "由于 " + message + ": \n"
+        reply += f"d{dice}={result}/{target} "
         if result:
             success = result < target
-            reply = f"success: {success}\nmessage_str: {message_str}\n result: {result}\nExplanation: {explanation}"
+            # reply = f"success: {success}\nmessage_str: {message_str}\n result: {result}\nExplanation: {explanation}"
+            if failll:
+                reply += "大失败 :)"
+            elif result > target:
+                if result > 95:
+                    reply += "大失败"
+                else:
+                    reply += "失败"
+            else:
+                if result <= 5:
+                    eply += "大成功"
+                elif result < target/5:
+                    reply += "极限成功"
+                elif result < target/2:
+                    reply += "困难成功"
+                else:
+                    reply += "成功"
+            
         else:
             reply = f"message_str: {message_str}\n failed to parse"
         
@@ -274,11 +429,22 @@ class MyPlugin(Star):
         if size==0:
             reply = "deck empty!"
             return reply
-        result, explanation = self.roll_dice(size)
+        result = self.roll_dice(size, True)
         if not result:
             reply = f"failed to roll: {size}"
             return reply
         drew = deck[result-1]
+        return drew
+    def draw_from_cp_texts(self):
+        size = len(self.cp_texts)
+        if size==0:
+            reply = "no cp texts!"
+            return reply
+        result = self.roll_dice(size, True)
+        if not result:
+            reply = f"failed to roll: {size}"
+            return reply
+        drew = self.cp_texts[result-1]
         return drew
         
 
@@ -302,6 +468,7 @@ class MyPlugin(Star):
             return 
         
         reply = self.draw_from_deck(deck_name)
+        reply.replace("\\n", "\n")
         yield event.plain_result(reply)
 
     def log_new(self, group_id, log_name=None):
@@ -342,7 +509,10 @@ class MyPlugin(Star):
         logger.debug(message_chain)
         message = self.parse_message(message_str, command="log")
         group_id = event.get_group_id()
-
+        if not group_id or group_id == "":
+            reply = "must use in a group"
+            yield event.plain_result(reply)
+            return
         tokens = message.strip().split(' ', 2) + ["", "", ""]
         if tokens[0] == "new":
             logger.debug("log new")
@@ -457,6 +627,25 @@ class MyPlugin(Star):
     def get_group_log_path(self, group_id, log_id):
         group_folder = self.get_group_folder(group_id)
         log_root = os.path.join(group_folder, "LOGS")
+        log_folder = os.path.join(log_root, str(log_id))
+        return log_folder
+    def get_group_cp_candidates_path(self, group_id):
+        group_folder = self.get_group_folder(group_id)
+        cp_candidates_file = os.path.join(group_folder, "ROLL_CP.txt")
+        return cp_candidates_file
+    def get_group_cp_candidates(self, group_id):
+        cp_candidates_file = self.get_group_cp_candidates_path(group_id)
+        if not os.path.exists(cp_candidates_file):
+            return []
+        cp_candidates = read_lines(cp_candidates_file)
+        return cp_candidates
+    def add_group_cp_candidate(self, group_id, user_id):
+        cp_candidates_file = self.get_group_cp_candidates_path(group_id)
+        new_line = str(user_id) + "\n"
+        append_txt(cp_candidates_file, new_line)
+    def get_user_log_path(self, user_id, log_id):
+        user_folder = self.get_user_folder(user_id)
+        log_root = os.path.join(user_folder, "LOGS")
         log_folder = os.path.join(log_root, str(log_id))
         return log_folder
 
@@ -670,3 +859,29 @@ class MyPlugin(Star):
         reply = f"selected character: {char_name}"
         return reply
 
+    # @filter.event_message_type(filter.EventMessageType.ALL)
+    # async def getpoke(self, event: AstrMessageEvent):
+    #     for comp in event.message_obj.message:
+    #         if isinstance(comp, Poke):
+    #             user_name = event.get_sender_name()
+    #             bot_id = event.message_obj.raw_message.get('self_id')
+    #             if comp.qq != bot_id:
+    #                 return
+    #             logger.info("检测到戳一戳")
+    #             # 具体功能
+    #             event.message_obj.message.insert(
+    #                 0, Comp.At(qq=event.get_self_id(), name=event.get_self_id())
+    #             )
+    #             str = f"{user_name} 戳了戳你的头！"
+    #             if event.session.message_type.name == 'GROUP_MESSAGE':
+    #                 astrbot_config = self.context.get_config()
+    #                 wake_prefix = astrbot_config["wake_prefix"]
+    #                 if wake_prefix != []:
+    #                     str = wake_prefix[0] + self.Superpoke_Command
+    #             event.message_obj.message.clear()
+    #             event.message_obj.message.append( Plain(str) )
+    #             event.message_obj.message_str = str
+    #             event.message_str = str
+    #             self.context.get_event_queue().put_nowait(event)
+    #             event.should_call_llm(True)
+    #             return
