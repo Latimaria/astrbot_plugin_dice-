@@ -108,6 +108,21 @@ def append_txt(filepath, data):
     create_parents(filepath)
     with open(filepath, "a", encoding="utf-8") as f:
         f.write(data)
+
+def string_to_deck(deck_str):
+    deck = extract_outer_braces(deck_str)
+    if len(deck) < 1:
+        return "", []
+    deck_name = deck[0]
+    cards = deck[1:] if len(deck)>1 else []
+    cards = [card.replace(r"\n", "\n") for card in cards]
+    return deck_name, cards
+def deck_to_string_to_deck(deck_name, cards):
+    deck_str = "{"+ deck_name + "} "
+    cards = ["{" + card.replace("\n", r"\n") + "}" for card in cards]
+    deck_str += " ".join(cards)
+    return deck_str
+
 @register("Dice!", "Lacki", "一个简单的 Hello World 插件", "0.0.0")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -125,22 +140,44 @@ class MyPlugin(Star):
             return
         for deck_str in self.config.decks:
             logger.info("deck: "+ deck_str)
-            deck = extract_outer_braces(deck_str)
-            if len(deck) < 1:
+            deck_name, cards = string_to_deck(deck_str)
+            if deck_name == "":
                 logger.info("invalid deck:\n "+ deck_str)
                 continue
-            deck_name = deck[0]
-            deck = deck[1:] if len(deck)>1 else []
-            deck = [card.replace(r"\n", "\n") for card in deck]
             if deck_name in self.decks and self.decks[deck_name] and self.decks[deck_name]!=[]:
-                self.decks[deck_name] += deck
+                self.decks[deck_name] += cards
             else:
-                self.decks[deck_name] = deck
+                self.decks[deck_name] = cards
         for cp_str in self.config.cp:
             logger.info("cp text: "+ cp_str)
             cp_str = cp_str.replace(r"\n", "\n")
             self.cp_texts.append(cp_str)
-            
+    
+    # def add_deck(self, deck):
+    #     deck_str = [card.replace("\n", r"\n") for card in deck]
+    #     logger.info("add deck: "+ deck_str)
+    #     deck = extract_outer_braces(deck_str)
+    #     if len(deck) < 1:
+    #         reply = "invalid deck\n "
+    #         return reply
+    #     deck_name = deck[0]
+    #     deck = deck[1:] if len(deck)>1 else []
+    #     if deck_name in self.decks and self.decks[deck_name] and self.decks[deck_name]!=[]:
+    #         self.decks[deck_name] += deck
+    #     else:
+    #         self.decks[deck_name] = deck
+    #     self.config.decks = "}{".join(self.decks)
+    #     self.config.save_config()
+
+    def _load_admins(self):
+        """加载管理员列表"""
+        try:
+            with open(os.path.join('data', 'cmd_config.json'), 'r', encoding='utf-8-sig') as f:
+                config = json.load(f)
+                return config.get('admins_id', [])
+        except Exception as e:
+            self.context.logger.error(f"加载管理员列表失败: {str(e)}")
+            return []    
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("helloworld")
@@ -198,8 +235,21 @@ class MyPlugin(Star):
             expression = ' '.join(message_tokens[:i])
             result, explanation, expression = self.roll_dice(expression)
             if result:
+                reason = " ".join(message_tokens[i:])
                 break
-        return result, explanation, expression
+        return result, explanation, expression, reason
+    def roll_dice_get_reply(self, message, command=None):
+        result, explanation, expression, reason = self.roll_dice_with_message(message, command)
+        if not result:
+            return None, f"message_str: {message}\n failed to parse"
+        reply = "由于 " + reason + ": \n"
+        reply += f"{expression}=[{explanation}]={result} \n"
+        reply += f"种出了{result}根小黄瓜"
+        if result > 95:
+            reply += ":)"
+        elif result <= 5:
+            reply += ":("
+        return result, reply
 
     @filter.command("rd")
     async def rd(self, event: AstrMessageEvent):
@@ -210,20 +260,13 @@ class MyPlugin(Star):
         logger.info(message_chain)
 
         # expression = self.parse_message(message_str)
-        result, explanation, expression = self.roll_dice_with_message(message_str, "rd")
+        result, dice_reply = self.roll_dice_get_reply(message_str, "rd")
 
         if result:
-            reply = f"message_str: {message_str}\n result: {result}\nExplanation: {explanation}"
             reply = f"<{user_name}>的检定结果\n"
-            reply += "由于 " + message_str + ": \n"
-            reply += f"{expression}=[{explanation}]={result} \n"
-            reply += f"种出了{result}根小黄瓜"
-            if result > 95:
-                reply += ":)"
-            elif result <= 5:
-                 reply += ":("
+            reply += dice_reply
         else:
-            reply = f"message_str: {message_str}\n expression: {expression}\n failed to parse"
+            reply = dice_reply
         
         yield event.plain_result(reply) 
 
@@ -336,18 +379,14 @@ class MyPlugin(Star):
         group_id = event.get_group_id()
         logger.info(message_chain)
         if group_id:
-            reply = f"rh from group {group_id}:\n"
+            reply = f"<{user_name}>于{group_id}的暗骰结果:\n"
         else:
-            reply = "rh :\n"
+            reply = f"<{user_name}>的暗骰结果:\n"
 
         # expression = self.parse_message(message_str)
-        result, explanation, expression = self.roll_dice_with_message(message_str, "rh")
+        result, dice_reply = self.roll_dice_get_reply(message_str, "rh")
+        reply += dice_reply
 
-        if result:
-            reply += f"message_str: {message_str}\n result: {result}\nExplanation: {explanation}"
-        else:
-            reply += f"message_str: {message_str}\n expression: {expression}\n failed to parse"
-        
         client = event.bot 
         payloads = {
             "user_id": sender_id,
