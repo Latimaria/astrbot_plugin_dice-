@@ -8,6 +8,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import \
                 AiocqhttpMessageEvent
 from astrbot.api.message_components import Poke,Plain
 import astrbot.api.message_components as Comp
+from astrbot.core.message.components import Plain, Image, At, Reply, Record, File, Node
 
 import random
 import re
@@ -15,6 +16,8 @@ import json
 import os
 import uuid
 import datetime
+import copy
+import time
 
 import rolldice
 
@@ -28,6 +31,10 @@ GROUP_DIR = os.path.join(DICE_DATA_DIR, "groups")
 PC_COMMANDS = ["new", "tag", "show", "nn", "cpy", "del", "list", "clear"]
 failll_keys = ["大失败", "(wink)", "99"]
 EXPRESSION_MAX_TOKENS = 42
+
+COMMANDS = ["rd", "rh", "jrrp", "ra", "draw", "log", "st", "群友cp", "poke"]
+KEYWORDS = []
+POKE_KEYWORDS = ["戳", "poke"]
 # -- data
 #      \___ user1 __ PC1 
 #              \____ PC2
@@ -132,6 +139,8 @@ class MyPlugin(Star):
         self.decks = {}
         self.cp_texts = []
         self.load_decks()
+        self.cooling_down = False
+        self.cooling_end_time = 0
 
     def load_decks(self):
         logger.info("loading decks")
@@ -177,7 +186,10 @@ class MyPlugin(Star):
                 return config.get('admins_id', [])
         except Exception as e:
             self.context.logger.error(f"加载管理员列表失败: {str(e)}")
-            return []    
+            return []   
+    def is_admin(self, user_id):
+        """检查用户是否为管理员"""
+        return str(user_id) in self.admins   
 
     # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
     @filter.command("helloworld")
@@ -898,29 +910,191 @@ class MyPlugin(Star):
         reply = f"selected character: {char_name}"
         return reply
 
-    # @filter.event_message_type(filter.EventMessageType.ALL)
-    # async def getpoke(self, event: AstrMessageEvent):
-    #     for comp in event.message_obj.message:
-    #         if isinstance(comp, Poke):
-    #             user_name = event.get_sender_name()
-    #             bot_id = event.message_obj.raw_message.get('self_id')
-    #             if comp.qq != bot_id:
-    #                 return
-    #             logger.info("检测到戳一戳")
-    #             # 具体功能
-    #             event.message_obj.message.insert(
-    #                 0, Comp.At(qq=event.get_self_id(), name=event.get_self_id())
-    #             )
-    #             str = f"{user_name} 戳了戳你的头！"
-    #             if event.session.message_type.name == 'GROUP_MESSAGE':
-    #                 astrbot_config = self.context.get_config()
-    #                 wake_prefix = astrbot_config["wake_prefix"]
-    #                 if wake_prefix != []:
-    #                     str = wake_prefix[0] + self.Superpoke_Command
-    #             event.message_obj.message.clear()
-    #             event.message_obj.message.append( Plain(str) )
-    #             event.message_obj.message_str = str
-    #             event.message_str = str
-    #             self.context.get_event_queue().put_nowait(event)
-    #             event.should_call_llm(True)
-    #             return
+    @filter.command("pokepoke")
+    async def pokepoke(self, event: AstrMessageEvent):
+        '''chuochuo''' # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
+        user_name = event.get_sender_name()
+        message_str = event.message_str # 用户发的纯文本消息字符串
+        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
+        logger.info(message_chain)
+        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+
+    def is_banned(self, event):
+        sender_id = str(event.get_sender_id())
+        group_id = event.message_obj.group_id if hasattr(event.message_obj, "group_id") else ""
+        if sender_id in self.config.ban_user:
+            logger.error(f"user {sender_id} is banned")
+            return True
+        if group_id in self.config.ban_group:
+            logger.error(f"group {group_id} is banned")
+            return True
+    def is_banned_from_llm(self, event):
+        sender_id = str(event.get_sender_id())
+        group_id = event.message_obj.group_id if hasattr(event.message_obj, "group_id") else ""
+        if sender_id in self.config.ban_llm_user:
+            logger.error(f"user {sender_id} is banned from llm")
+            return True
+        if group_id in self.config.ban_llm_group:
+            logger.error(f"group {group_id} is banned from llm")
+            return True
+    def ban_user(self, user_id):
+        self.config.ban_user.append(str(user_id))
+        self.config.save_config()
+    def unban_user(self, user_id):
+        self.config.ban_user.remove(str(user_id))
+        self.config.save_config()
+    def ban_user_from_llm(self, user_id):
+        self.config.ban_llm_user.append(str(user_id))
+        self.config.save_config()
+    def unban_user_from_llm(self, user_id):
+        self.config.ban_user.remove(str(user_id))
+        self.config.ban_llm_user.remove(str(user_id))
+        self.config.save_config()
+    def ban_group(self, group_id):
+        self.config.ban_group.append(str(group_id))
+        self.config.save_config()
+    def unban_group(self, group_id):
+        self.config.ban_group.remove(str(group_id))
+        self.config.save_config()
+    def ban_group_from_llm(self, group_id):
+        self.config.ban_llm_group.append(str(group_id))
+        self.config.save_config()
+    def unban_group_from_llm(self, group_id):
+        self.config.ban_group.remove(str(group_id))
+        self.config.ban_llm_ugroup.remove(str(group_id))
+        self.config.save_config()
+
+    @event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def handle_group_message(self, event: AstrMessageEvent):
+        if self.is_banned(event):
+            event.stop_event()
+            # yield event.plain_result("Hello")
+            return
+        message_obj = event.message_obj # 获取消息对象
+        message_str = message_obj.message_str # 消息文本内容
+        self_id = event.get_self_id() # 机器人QQ号
+        group_id = message_obj.group_id # 群号
+        for command in COMMANDS:
+            if message_str.startswith("." + command):
+                # yield event.plain_result("command "+command)
+                return
+            if message_str.startswith("/"):
+                # yield event.plain_result("command "+command)
+                return
+        # 检查消息开头是否有关键词
+        if not self.config.poke:
+            return
+        
+        if self.is_banned_from_llm(event):
+            # yield event.plain_result("stop")
+            event.stop_event()
+            return
+        
+        for keyword in POKE_KEYWORDS:
+            if keyword in message_str:
+                # 确定戳一戳的次数 (有感叹号会触发更多戳戳)
+                if re.match(rf'^{keyword}(！|!)$', message_str):
+                        poke_times = random.randint(5, 10)
+                else:
+                    poke_times = random.randint(1, 3)
+
+                # 提取消息中 @ 的用户
+                messages = event.get_messages()
+                target_user_id = next((str(seg.qq) for seg in messages if (isinstance(seg, Comp.At))), None)
+
+                # 检查是否有 @ 的用户
+                if target_user_id is None:
+                    target_user_id = event.get_sender_id()
+                # 检查受击人是否机器人本体
+                if str(target_user_id) == str(self_id):
+                    # yield event.plain_result(random.choice(self_poke_messages)) # self_poke_messages 为不能自己戳自己的话术列表
+                    return
+                
+                # 检查是否在冷却期
+                if self.cooling_down and time.time() < self.cooling_end_time:
+                    # yield event.plain_result(random.choice(cooling_down_messages))
+                    return
+                
+                # # 攻击前自嗨
+                # yield event.plain_result(random.choice(received_commands_messages))
+
+                # 发送戳一戳
+                payloads = {"user_id": target_user_id, "group_id": group_id}
+                for _ in range(poke_times):
+                    try:
+                        await event.bot.api.call_action('send_poke', **payloads)
+                    except Exception as e:
+                        pass
+
+                # 进入冷却期
+                self.cooling_down = True
+                cooling_duration = random.randint(30, 60)
+                self.cooling_end_time = time.time() + cooling_duration
+                return
+
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def getpoke(self, event: AstrMessageEvent):
+        for comp in event.message_obj.message:
+            if isinstance(comp, Poke):
+                bot_id = event.message_obj.raw_message.get('self_id')
+                sender_id = event.get_sender_id()
+                group_id = event.get_group_id()
+                logger.info("检测到戳一戳")
+                poke_times = self.roll_dice("1d3", True)
+                if comp.qq != bot_id and sender_id != bot_id:
+                    logger.info(f"sender: {sender_id} bot {bot_id}")
+                    payloads = {"user_id": comp.qq, "group_id": group_id}
+                    try:
+                        logger.info("HELLO")
+                        # await event.bot.api.call_action('send_poke', **payloads)
+                        logger.info("BYE")
+                    except Exception as e:
+                        pass
+                    return
+                
+                message_chain = event.get_messages()
+                nickname = sender_id
+                if event.get_platform_name() == "aiocqhttp":
+                    assert isinstance(event, AiocqhttpMessageEvent)
+                    stranger_info = await event.bot.api.call_action(
+                        'get_stranger_info', user_id=sender_id
+                    )
+                    nickname = stranger_info.get("nick", nickname)
+                # yield event.plain_result(f"{nickname} 惊扰了 黄瓜精灵！") 
+                bot_id = event.message_obj.raw_message.get('self_id')
+                # if comp.qq != bot_id:
+                #     return
+                
+                # 具体功能
+                event.message_obj.message.insert(
+                    0, Comp.At(qq=event.get_self_id(), name=event.get_self_id())
+                )
+                new_event = copy.copy(event)
+                message_str = f"{nickname} 戳了戳你的头！"
+                if event.session.message_type.name == 'GROUP_MESSAGE':
+                    astrbot_config = self.context.get_config()
+                    wake_prefix = astrbot_config["wake_prefix"]
+                    if wake_prefix != []:
+                        message_str = wake_prefix[0] + message_str
+                new_event.message_obj.message.clear()
+                new_event.message_obj.message.append( Plain(message_str) )
+                new_event.message_obj.message_str = message_str
+                new_event.message_str = message_str
+                new_event.message_obj.message.insert(
+                    0, At(qq=event.get_self_id(), name=event.get_self_id())
+                )
+                new_event.should_call_llm(True)
+                self.context.get_event_queue().put_nowait(new_event)
+
+                # logger.info("HERE")
+                payloads = {"user_id": sender_id, "group_id": group_id}
+                # for _ in range(poke_times):
+                try:
+                    logger.info("THERE")
+                    await event.bot.api.call_action('send_poke', **payloads)
+                    logger.info("AFTER")
+                except Exception as e:
+                    pass
+                # return
+                yield event.plain_result(f"{nickname} 惊扰了 黄瓜精灵！") 
